@@ -8,26 +8,26 @@ import { protect, admin } from "../middleware/AuthMiddleware.js";
 import cloudinary from "../cloudinary_temp.js";
 import { io } from "../server.js";
 
-const caseRoute = express.Router();
+const router = express.Router();
 
-// Multer en mémoire pour Cloudinary
+// ----------------- Multer en mémoire -----------------
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// Upload fichier sur Cloudinary
+// ----------------- Cloudinary helper -----------------
 const uploadToCloudinary = (fileBuffer, folder = "cases") =>
   new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       { folder, resource_type: "auto" },
-      (error, result) => (result ? resolve(result.secure_url) : reject(error))
+      (err, result) => (result ? resolve(result.secure_url) : reject(err))
     );
     stream.end(fileBuffer);
   });
 
-// ===== Helper : assigner l’agent le moins chargé
+// ----------------- Helper assignation agent -----------------
 const assignAgent = async () => {
   const agents = await User.find({ role: "agent" });
-  if (!agents || agents.length === 0) return null;
+  if (!agents.length) return null;
 
   const counts = await Promise.all(
     agents.map(async (a) => ({
@@ -43,32 +43,25 @@ const assignAgent = async () => {
   return counts[0].agent;
 };
 
-// ===== POST /api/case ===== Créer un signalement
-caseRoute.post("/", protect, upload.array("piecesJointes", 10), async (req, res) => {
+// ----------------- CREATE SIGNALMENT -----------------
+router.post("/", protect, upload.array("piecesJointes", 10), async (req, res) => {
   try {
-    const { titre, typeViolation, detailViolation,description, anonyme, nomDeclarant, dateHeure } = req.body;
+    const { titre, typeViolation, detailViolation, description, anonyme, nomDeclarant, dateHeure } = req.body;
 
-    if (!titre || !typeViolation) {
-      return res.status(400).json({ message: "Champs obligatoires manquants" });
-    }
+    if (!titre || !typeViolation) return res.status(400).json({ message: "Champs obligatoires manquants" });
 
     const boolAnonyme = anonyme === true || anonyme === "true";
     const dateTimeObj = dateHeure ? new Date(dateHeure) : new Date();
 
     // Upload fichiers vers Cloudinary
     const piecesJointes = [];
-    if (req.files && req.files.length > 0) {
+    if (req.files?.length) {
       for (const file of req.files) {
-        try {
-          const url = await uploadToCloudinary(file.buffer);
-          piecesJointes.push({
-            url,
-            typeFichier: file.mimetype.split("/")[0],
-          });
-        } catch (err) {
-          console.error("Erreur Cloudinary:", err);
-          return res.status(500).json({ message: "Erreur Cloudinary", error: err.message });
-        }
+        const url = await uploadToCloudinary(file.buffer);
+        piecesJointes.push({
+          url,
+          typeFichier: file.mimetype.split("/")[0],
+        });
       }
     }
 
@@ -85,7 +78,7 @@ caseRoute.post("/", protect, upload.array("piecesJointes", 10), async (req, res)
       piecesJointes,
     });
 
-    // Assignation automatique
+    // Assignation automatique à un agent
     const agent = await assignAgent();
     if (agent) {
       newCase.assigneA = agent._id;
@@ -105,46 +98,23 @@ caseRoute.post("/", protect, upload.array("piecesJointes", 10), async (req, res)
     });
     await history.save();
 
-    // Socket.IO – notifier l’agent
+    // -------- Socket.IO --------
+    // 1️⃣ Notifier le citoyen créateur
+    if (io) io.to(req.user._id.toString()).emit("newCase", newCase);
+
+    // 2️⃣ Notifier l’agent assigné
     if (agent && io) io.to(agent._id.toString()).emit("nouveauCas", newCase);
 
     res.status(201).json({ message: "Signalement créé", case: newCase });
+
   } catch (err) {
     console.error("Erreur serveur:", err);
     res.status(500).json({ message: "Erreur serveur", error: err.message });
   }
 });
 
-// ✅ GET /api/case/all – Tous les cas (admin uniquement)
-caseRoute.get("/all", protect, admin, async (req, res) => {
-  try {
-    const allCases = await Case.find()
-      .populate("assigneA", "name email")
-      .populate("declarant", "name email")
-      .sort({ createdAt: -1 });
-
-    res.json(allCases);
-  } catch (err) {
-    console.error("Erreur récupération tous les dossiers :", err);
-    res.status(500).json({ message: "Erreur serveur", error: err.message });
-  }
-});
-
-// ===== GET /api/case/mescas – Dossiers assignés à l’agent
-caseRoute.get("/mescas", protect, async (req, res) => {
-  try {
-    const mesCas = await Case.find({ assigneA: req.user._id })
-      .populate("assigneA", "name")
-      .sort({ createdAt: -1 });
-
-    res.json(mesCas);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ===== GET /api/case/mesdossiers – Dossiers déclarés par le citoyen
-caseRoute.get("/mesdossiers", protect, async (req, res) => {
+// ----------------- GET MES DOSSIERS -----------------
+router.get("/mesdossiers", protect, async (req, res) => {
   try {
     const myCases = await Case.find({ declarant: req.user._id })
       .populate("assigneA", "name")
@@ -157,8 +127,20 @@ caseRoute.get("/mesdossiers", protect, async (req, res) => {
   }
 });
 
-// ===== PUT /api/case/:id/statut – Mettre à jour le statut
-caseRoute.put("/:id/statut", protect, async (req, res) => {
+// ----------------- GET MES CAS (agents) -----------------
+router.get("/mescas", protect, async (req, res) => {
+  try {
+    const mesCas = await Case.find({ assigneA: req.user._id })
+      .populate("assigneA", "name")
+      .sort({ createdAt: -1 });
+    res.json(mesCas);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ----------------- UPDATE STATUT -----------------
+router.put("/:id/statut", protect, async (req, res) => {
   try {
     const { statut } = req.body;
     const c = await Case.findById(req.params.id);
@@ -178,8 +160,8 @@ caseRoute.put("/:id/statut", protect, async (req, res) => {
   }
 });
 
-// ===== PUT /api/case/:id/assigner – Assigner un agent (admin)
-caseRoute.put("/:id/assigner", protect, admin, async (req, res) => {
+// ----------------- UPDATE ASSIGNATION (admin) -----------------
+router.put("/:id/assigner", protect, admin, async (req, res) => {
   const { agentId } = req.body;
   try {
     const caseItem = await Case.findById(req.params.id);
@@ -198,8 +180,8 @@ caseRoute.put("/:id/assigner", protect, admin, async (req, res) => {
   }
 });
 
-// ===== PUT /api/case/:id/evolution – Ajouter une évolution
-caseRoute.put("/:id/evolution", protect, async (req, res) => {
+// ----------------- ADD EVOLUTION -----------------
+router.put("/:id/evolution", protect, async (req, res) => {
   try {
     const { etape, commentaire } = req.body;
     const c = await Case.findById(req.params.id);
@@ -223,15 +205,14 @@ caseRoute.put("/:id/evolution", protect, async (req, res) => {
   }
 });
 
-// ===== GET /api/case/:id – Récupérer un dossier par ID
-caseRoute.get("/:id", protect, async (req, res) => {
+// ----------------- GET CASE BY ID -----------------
+router.get("/:id", protect, async (req, res) => {
   try {
     const c = await Case.findById(req.params.id)
       .populate("assigneA", "name")
       .populate("evolution.creePar", "name");
 
     if (!c) return res.status(404).json({ message: "Dossier introuvable" });
-
     if (req.user.role !== "admin" && String(c.assigneA?._id) !== req.user._id.toString()) {
       return res.status(403).json({ message: "Non autorisé" });
     }
@@ -242,4 +223,4 @@ caseRoute.get("/:id", protect, async (req, res) => {
   }
 });
 
-export default caseRoute;
+export default router;
