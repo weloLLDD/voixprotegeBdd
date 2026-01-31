@@ -113,6 +113,21 @@ router.post("/", protect, upload.array("piecesJointes", 10), async (req, res) =>
   }
 });
 
+// GET tous les dossiers (admin)
+router.get("/all", protect, admin, async (req, res) => {
+  try {
+    const allCases = await Case.find()
+      .populate("assigneA", "name")
+      .populate("evolution.creePar", "name")
+      .sort({ createdAt: -1 });
+
+    res.json(allCases);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
 // ----------------- GET MES DOSSIERS -----------------
 router.get("/mesdossiers", protect, async (req, res) => {
   try {
